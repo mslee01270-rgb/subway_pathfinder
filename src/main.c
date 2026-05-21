@@ -10,15 +10,6 @@
 #include "file_io.h"
 #include "ui.h"
 
-/*
- * main.c - 메인 루프 및 메뉴 관리
- *
- * 전체 프로그램 흐름:
- * 1. 데이터 로드 (CSV → 그래프 + 해시 테이블)
- * 2. 메뉴 출력
- * 3. 경로 탐색 / 기록 조회 / 역 목록 / 결과 저장
- */
-
 /* UTF-8에서 '역'(EC 97 AD) 자동 제거 */
 static void remove_station_suffix(char* name) {
     int len = (int)strlen(name);
@@ -29,13 +20,29 @@ static void remove_station_suffix(char* name) {
         name[len-3] = '\0';
 }
 
-/* 유사한 역 이름 추천 */
+/*
+ * 유사 역 추천
+ * UTF-8 바이트 단위로 앞부분 일치 여부 비교
+ * 입력값 길이만큼만 비교해서 부분 일치 찾기
+ */
 static void suggest_station(Graph* g, const char* input) {
     int found = 0;
+    int input_len = (int)strlen(input);
+    if (input_len == 0) return;
+
     printf("  혹시 이 역을 찾으셨나요?\n");
     for (int i = 0; i < MAX_STATIONS; i++) {
         if (!g->stations[i].valid) continue;
-        if (strstr(g->stations[i].name, input)) {
+        const char* name = g->stations[i].name;
+        int name_len = (int)strlen(name);
+        if (name_len < input_len) continue;
+
+        /* 앞부분 바이트 비교 */
+        int match = 1;
+        for (int j = 0; j < input_len; j++) {
+            if (name[j] != input[j]) { match = 0; break; }
+        }
+        if (match) {
             printf("  → %s (%d호선)\n",
                    g->stations[i].name, g->stations[i].line);
             found++;
@@ -46,60 +53,46 @@ static void suggest_station(Graph* g, const char* input) {
         printf("  (유사한 역 없음. 3번 메뉴에서 전체 목록 확인)\n");
 }
 
-/*
- * 경로 결과를 txt 파일로 저장
- * data/result.txt에 저장
- */
+/* 결과를 txt 파일로 저장 */
 static void save_result_to_file(Graph* g, PathResult* dijk, PathResult* bfs,
                                  const char* from, const char* to) {
-    /* data 폴더 없으면 생성 */
 #ifdef _WIN32
     system("mkdir data 2>nul");
 #else
     system("mkdir -p data");
 #endif
 
-    FILE* f = fopen("data/result.txt", "a"); /* 이어쓰기 모드 */
-    if (!f) {
-        printf("  [!] 파일 저장 실패\n");
-        return;
-    }
+    FILE* f = fopen("data/result.txt", "a");
+    if (!f) { printf("  [!] 파일 저장 실패\n"); return; }
 
-    /* 저장 시각 기록 */
     time_t now = time(NULL);
     struct tm* t = localtime(&now);
     fprintf(f, "========================================\n");
     fprintf(f, "검색 시각: %04d-%02d-%02d %02d:%02d:%02d\n",
             t->tm_year+1900, t->tm_mon+1, t->tm_mday,
             t->tm_hour, t->tm_min, t->tm_sec);
-    fprintf(f, "구간: %s → %s\n\n", from, to);
+    fprintf(f, "구간: %s -> %s\n\n", from, to);
 
-    /* 최단 시간 경로 저장 */
     fprintf(f, "[최단 시간 경로 - 다익스트라]\n");
     if (dijk->found) {
         for (int i = 0; i < dijk->path_len; i++) {
             fprintf(f, "%s", g->stations[dijk->path[i]].name);
-            if (i < dijk->path_len - 1) fprintf(f, " → ");
+            if (i < dijk->path_len - 1) fprintf(f, " -> ");
         }
         fprintf(f, "\n총 %d분 | 환승 %d회\n\n", dijk->total_time, dijk->transfers);
-    } else {
-        fprintf(f, "경로 없음\n\n");
-    }
+    } else fprintf(f, "경로 없음\n\n");
 
-    /* 최소 환승 경로 저장 */
     fprintf(f, "[최소 환승 경로 - BFS]\n");
     if (bfs->found) {
         for (int i = 0; i < bfs->path_len; i++) {
             fprintf(f, "%s", g->stations[bfs->path[i]].name);
-            if (i < bfs->path_len - 1) fprintf(f, " → ");
+            if (i < bfs->path_len - 1) fprintf(f, " -> ");
         }
         fprintf(f, "\n총 %d분 | 환승 %d회\n\n", bfs->total_time, bfs->transfers);
-    } else {
-        fprintf(f, "경로 없음\n\n");
-    }
+    } else fprintf(f, "경로 없음\n\n");
 
     fclose(f);
-    printf("\n  [검색 결과가 data/result.txt에 저장되었습니다]\n");
+    printf("\n  [결과가 data/result.txt에 저장되었습니다]\n");
 }
 
 int main(void) {
@@ -107,14 +100,13 @@ int main(void) {
     StationHash*  h = hash_create();
     HistoryStack* s = history_create();
 
-    /* 데이터 로드 */
     ui_clear();
     ui_print_title();
     printf("  데이터 로드 중...\n");
 
     int loaded = load_subway_data(g, h);
     if (!loaded) {
-        printf("  CSV 파일 없음. 기본 데이터로 실행합니다.\n");
+        printf("  CSV 없음. 기본 데이터로 실행합니다.\n");
         load_default_data(g, h);
     } else {
         printf("  %d개 역 로드 완료!\n", graph_station_count(g));
@@ -136,7 +128,7 @@ int main(void) {
             char to_name[MAX_NAME_LEN];
 
             printf("\n  * 역 이름만 입력하세요 (예: 강남, 홍대입구, 소사)\n");
-            printf("  * '역'을 붙여도 자동으로 처리됩니다\n\n");
+            printf("  * 전체 이름을 정확히 입력해주세요\n\n");
             printf("출발역 입력: ");
             scanf("%63s", from_name);
             printf("도착역 입력: ");
@@ -170,28 +162,22 @@ int main(void) {
             PathResult dijk_ab = dijkstra(g, from_id, to_id);
             PathResult bfs_ab  = bfs_min_transfer(g, from_id, to_id);
 
-            /* B→A 경로 탐색 (양방향 비교) */
+            /* B→A 경로 탐색 */
             PathResult dijk_ba = dijkstra(g, to_id, from_id);
             PathResult bfs_ba  = bfs_min_transfer(g, to_id, from_id);
 
-            /* A→B 결과 출력 */
             ui_print_result(g, &dijk_ab, &bfs_ab, from_name, to_name);
-
-            /* B→A 결과 출력 */
             printf("\n");
             ui_print_result(g, &dijk_ba, &bfs_ba, to_name, from_name);
 
-            /* 검색 기록 저장 */
             if (dijk_ab.found)
                 history_push(s, from_name, to_name,
                              dijk_ab.total_time, dijk_ab.transfers);
 
-            /* 파일 저장 여부 묻기 */
             printf("\n  결과를 파일로 저장하시겠습니까? (1=예 / 기타=아니오): ");
             int save_choice;
-            if (scanf("%d", &save_choice) == 1 && save_choice == 1) {
+            if (scanf("%d", &save_choice) == 1 && save_choice == 1)
                 save_result_to_file(g, &dijk_ab, &bfs_ab, from_name, to_name);
-            }
 
             printf("\n아무 키나 누르세요...\n"); getchar(); getchar();
 
